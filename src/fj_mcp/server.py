@@ -11,6 +11,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -18,6 +19,8 @@ from . import __version__
 
 
 LOCATOR_RE = re.compile(r"^(?P<owner>[^/\s]+)/(?P<repo>[^#\s]+)#(?P<number>\d+)$")
+SENSITIVE_FLAGS = {"--body", "--body-file", "--message", "--with-msg"}
+VALID_LOG_LEVELS = {"debug": 10, "info": 20, "error": 30}
 
 
 @dataclass
@@ -36,11 +39,41 @@ class ToolExecutionError(RuntimeError):
     pass
 
 
+class StderrLogger:
+    def __init__(self, level: str) -> None:
+        normalized = level.lower()
+        if normalized not in VALID_LOG_LEVELS:
+            raise ValueError(f"invalid log level: {level}")
+        self.level = normalized
+
+    def _enabled(self, level: str) -> bool:
+        return VALID_LOG_LEVELS[level] >= VALID_LOG_LEVELS[self.level]
+
+    def log(self, level: str, message: str) -> None:
+        if not self._enabled(level):
+            return
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        print(f"[{timestamp}] {level.upper()} {message}", file=sys.stderr, flush=True)
+
+    def debug(self, message: str) -> None:
+        self.log("debug", message)
+
+    def info(self, message: str) -> None:
+        self.log("info", message)
+
+    def error(self, message: str) -> None:
+        self.log("error", message)
+
+
+LOGGER = StderrLogger(os.environ.get("FJ_MCP_LOG_LEVEL", "info"))
+
+
 class FjRunner:
-    def __init__(self, fj_bin: str, neutral_cwd: str, default_host: str | None) -> None:
+    def __init__(self, fj_bin: str, neutral_cwd: str, default_host: str | None, logger: StderrLogger) -> None:
         self.fj_bin = fj_bin
         self.neutral_cwd = neutral_cwd
         self.default_host = default_host
+        self.logger = logger
 
     def run(
         self,
@@ -57,6 +90,9 @@ class FjRunner:
         command.extend(args)
 
         resolved_cwd = cwd or self.neutral_cwd
+        self.logger.info(
+            f"running fj command cwd={resolved_cwd} command={format_command_for_logs(command)}"
+        )
         completed = subprocess.run(
             command,
             cwd=resolved_cwd,
@@ -64,6 +100,12 @@ class FjRunner:
             text=True,
             check=False,
         )
+        self.logger.info(
+            "fj command finished "
+            f"exit_code={completed.returncode} stdout_len={len(completed.stdout)} stderr_len={len(completed.stderr)}"
+        )
+        if completed.stderr.strip():
+            self.logger.debug(f"fj stderr={completed.stderr.strip()}")
         return CommandResult(
             command=command,
             cwd=resolved_cwd,
@@ -342,11 +384,42 @@ def maybe_add_option(command: list[str], flag: str, value: Any) -> None:
     command.extend([flag, str(value)])
 
 
+def format_command_for_logs(command: list[str]) -> str:
+    sanitized: list[str] = []
+    redact_next = False
+    redact_last_arg = False
+    for index, token in enumerate(command):
+        if redact_next:
+            sanitized.append("<redacted>")
+            redact_next = False
+            continue
+        if token in SENSITIVE_FLAGS:
+            sanitized.append(token)
+            redact_next = True
+            continue
+        if token in {"issue", "pr"} and index + 1 < len(command) and command[index + 1] == "comment":
+            sanitized.append(token)
+            redact_last_arg = True
+            continue
+        sanitized.append(token)
+
+    if redact_last_arg and len(sanitized) >= 1:
+        sanitized[-1] = "<redacted>"
+    return " ".join(shlex_quote(part) for part in sanitized)
+
+
+def shlex_quote(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_./:=+-]+", value):
+        return value
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
 class FjMcpService:
-    def __init__(self, runner: FjRunner, approval_token_env: str, current_dir: str) -> None:
+    def __init__(self, runner: FjRunner, approval_token_env: str, current_dir: str, logger: StderrLogger) -> None:
         self.runner = runner
         self.approval_token_env = approval_token_env
         self.current_dir = current_dir
+        self.logger = logger
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[bool, str]:
         handlers = {
@@ -366,7 +439,13 @@ class FjMcpService:
         handler = handlers.get(name)
         if handler is None:
             raise ToolExecutionError(f"unknown tool: {name}")
+        self.logger.info(
+            f"tool call started name={name} arg_keys={sorted(arguments.keys())}"
+        )
         payload = handler(arguments)
+        self.logger.info(
+            f"tool call finished name={name} is_error={payload['is_error']}"
+        )
         return payload["is_error"], json.dumps(payload["data"], indent=2, ensure_ascii=False)
 
     def _run_fj(
@@ -499,10 +578,12 @@ class FjMcpService:
                 "Authorization": f"token {token}",
             },
         )
+        self.logger.info(f"submitting PR approval request url={url}")
         try:
             with urllib.request.urlopen(request) as response:
                 raw_body = response.read().decode("utf-8")
                 parsed_body = json.loads(raw_body) if raw_body else None
+                self.logger.info(f"approval request succeeded status={response.status} url={url}")
                 return {
                     "is_error": False,
                     "data": {
@@ -517,6 +598,7 @@ class FjMcpService:
                 parsed_body = json.loads(raw_body) if raw_body else None
             except json.JSONDecodeError:
                 parsed_body = raw_body
+            self.logger.error(f"approval request failed status={exc.code} url={url}")
             return {
                 "is_error": True,
                 "data": {
@@ -621,12 +703,14 @@ def encode_tool_result(is_error: bool, text: str) -> dict[str, Any]:
 
 
 class McpServer:
-    def __init__(self, service: FjMcpService) -> None:
+    def __init__(self, service: FjMcpService, logger: StderrLogger) -> None:
         self.service = service
+        self.logger = logger
 
     def handle_request(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
         request_id = message.get("id")
+        self.logger.info(f"received MCP message method={method} id={request_id}")
 
         if method == "initialize":
             return success_response(
@@ -655,11 +739,14 @@ class McpServer:
                 is_error, text = self.service.call_tool(tool_name, arguments)
                 return success_response(request_id, encode_tool_result(is_error, text))
             except ToolExecutionError as exc:
+                self.logger.error(f"tool call failed name={tool_name} error={exc}")
                 return success_response(request_id, encode_tool_result(True, str(exc)))
             except Exception as exc:  # noqa: BLE001
+                self.logger.error(f"tool call crashed name={tool_name} error={exc}")
                 return error_response(request_id, -32603, f"tool execution failed: {exc}")
         if request_id is None:
             return None
+        self.logger.error(f"method not found method={method} id={request_id}")
         return error_response(request_id, -32601, f"method not found: {method}")
 
 
@@ -687,6 +774,9 @@ def write_message(message: dict[str, Any]) -> None:
     sys.stdout.buffer.write(f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii"))
     sys.stdout.buffer.write(payload)
     sys.stdout.buffer.flush()
+    LOGGER.debug(
+        f"sent MCP message id={message.get('id')} has_result={'result' in message} has_error={'error' in message}"
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -711,34 +801,52 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("FJ_MCP_NEUTRAL_CWD", tempfile.gettempdir()),
         help="Working directory used for fj commands that should not depend on the current repository.",
     )
+    parser.add_argument(
+        "--log-level",
+        default=os.environ.get("FJ_MCP_LOG_LEVEL", "info"),
+        choices=sorted(VALID_LOG_LEVELS),
+        help="stderr log verbosity.",
+    )
     return parser.parse_args(argv)
 
 
-def run_stdio_server(server: McpServer) -> int:
+def run_stdio_server(server: McpServer, logger: StderrLogger) -> int:
+    logger.info("stdio server loop started")
     while True:
         try:
             message = read_message()
             if message is None:
+                logger.info("stdin closed, shutting down")
                 return 0
             response = server.handle_request(message)
             if response is not None:
                 write_message(response)
         except Exception:  # noqa: BLE001
+            logger.error("fatal exception in stdio loop")
             traceback.print_exc(file=sys.stderr)
             return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    global LOGGER
+    LOGGER = StderrLogger(args.log_level)
+    LOGGER.info(
+        "starting fj-mcp "
+        f"version={__version__} default_host={args.default_host or '<unset>'} "
+        f"fj_bin={args.fj_bin} neutral_cwd={args.neutral_cwd}"
+    )
     runner = FjRunner(
         fj_bin=args.fj_bin,
         neutral_cwd=args.neutral_cwd,
         default_host=args.default_host,
+        logger=LOGGER,
     )
     service = FjMcpService(
         runner=runner,
         approval_token_env=args.approval_token_env,
         current_dir=os.getcwd(),
+        logger=LOGGER,
     )
-    server = McpServer(service)
-    return run_stdio_server(server)
+    server = McpServer(service, LOGGER)
+    return run_stdio_server(server, LOGGER)

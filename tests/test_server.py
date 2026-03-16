@@ -3,12 +3,22 @@ from __future__ import annotations
 import json
 import unittest
 
-from fj_mcp.server import CommandResult, FjMcpService, FjRunner, McpServer, TOOLS, normalize_host, parse_locator
+from fj_mcp.server import (
+    CommandResult,
+    FjMcpService,
+    FjRunner,
+    McpServer,
+    StderrLogger,
+    TOOLS,
+    format_command_for_logs,
+    normalize_host,
+    parse_locator,
+)
 
 
 class FakeRunner(FjRunner):
     def __init__(self) -> None:
-        super().__init__(fj_bin="fj", neutral_cwd="/tmp", default_host="git.example.com")
+        super().__init__(fj_bin="fj", neutral_cwd="/tmp", default_host="git.example.com", logger=StderrLogger("error"))
         self.calls: list[tuple[list[str], str | None, str | None]] = []
 
     def run(self, args: list[str], *, host: str | None = None, cwd: str | None = None):  # type: ignore[override]
@@ -25,7 +35,12 @@ class FakeRunner(FjRunner):
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = FakeRunner()
-        self.service = FjMcpService(self.runner, approval_token_env="MISSING_TOKEN", current_dir="/work/repo")
+        self.service = FjMcpService(
+            self.runner,
+            approval_token_env="MISSING_TOKEN",
+            current_dir="/work/repo",
+            logger=StderrLogger("error"),
+        )
 
     def test_parse_locator(self) -> None:
         self.assertEqual(parse_locator("owner/repo#42"), ("owner", "repo", 42))
@@ -76,6 +91,13 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing approval token"):
             self.service.approve_pull_request({"pull_request": "owner/repo#1"})
 
+    def test_format_command_for_logs_redacts_sensitive_values(self) -> None:
+        formatted = format_command_for_logs(
+            ["fj", "--host", "git.example.com", "issue", "comment", "owner/repo#1", "secret body"]
+        )
+        self.assertIn("<redacted>", formatted)
+        self.assertNotIn("secret body", formatted)
+
 
 class McpServerTests(unittest.TestCase):
     def test_tools_list_contains_required_tools(self) -> None:
@@ -96,16 +118,16 @@ class McpServerTests(unittest.TestCase):
 
     def test_initialize_response(self) -> None:
         runner = FakeRunner()
-        service = FjMcpService(runner, approval_token_env="MISSING_TOKEN", current_dir="/repo")
-        server = McpServer(service)
+        service = FjMcpService(runner, approval_token_env="MISSING_TOKEN", current_dir="/repo", logger=StderrLogger("error"))
+        server = McpServer(service, StderrLogger("error"))
         response = server.handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         assert response is not None
         self.assertEqual(response["result"]["serverInfo"]["name"], "fj-mcp")
 
     def test_tool_error_is_returned_as_tool_result(self) -> None:
         runner = FakeRunner()
-        service = FjMcpService(runner, approval_token_env="MISSING_TOKEN", current_dir="/repo")
-        server = McpServer(service)
+        service = FjMcpService(runner, approval_token_env="MISSING_TOKEN", current_dir="/repo", logger=StderrLogger("error"))
+        server = McpServer(service, StderrLogger("error"))
         response = server.handle_request(
             {
                 "jsonrpc": "2.0",
