@@ -20,7 +20,7 @@ Servidor MCP por `stdio` para Forgejo, pensado para agentes que colaboran en des
 ## Cómo ejecutarlo
 
 ```bash
-uv run fj-mcp --default-host git.skivent.co
+uv run fj-mcp --default-host git.my-forgejo.com
 ```
 
 También puedes usarlo con `uvx` sin instalación global:
