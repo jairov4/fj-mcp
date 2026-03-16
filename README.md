@@ -64,9 +64,10 @@ Si prefieres no usar `uvx`, el ejemplo anterior también funciona con:
 {
   "mcpServers": {
     "fj": {
-      "command": "uv",
+      "command": "uvx",
       "args": [
-        "run",
+        "--from",
+        "git+https://github.com/jairov4/fj-mcp.git",
         "fj-mcp",
         "--default-host",
         "git.skivent.co"
@@ -84,7 +85,7 @@ Por defecto busca el token en `FORGEJO_TOKEN`:
 
 ```bash
 export FORGEJO_TOKEN=tu_token
-uv run fj-mcp --default-host git.skivent.co
+uv run fj-mcp --default-host git.my-forgejo.com
 ```
 
 ## Formatos importantes
