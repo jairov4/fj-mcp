@@ -1,0 +1,14 @@
+[project]
+name = "fj-mcp"
+version = "0.1.0"
+description = "Forgejo MCP server backed by fj"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+fj-mcp = "fj_mcp.server:main"
+
+[build-system]
+requires = ["uv_build>=0.10.9,<0.11.0"]
+build-backend = "uv_build"
