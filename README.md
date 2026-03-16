@@ -26,7 +26,7 @@ uv run fj-mcp --default-host git.skivent.co
 También puedes usarlo con `uvx` sin instalación global:
 
 ```bash
-uvx --from /ruta/a/fj-mcp fj-mcp --default-host git.skivent.co
+uvx --from git+https://github.com/jairov4/fj-mcp.git fj-mcp --default-host git.my-forgejo.com
 ```
 
 Ejemplo de configuración en `mcp.json`:
@@ -41,7 +41,7 @@ Ejemplo de configuración en `mcp.json`:
         "/ruta/a/fj-mcp",
         "fj-mcp",
         "--default-host",
-        "git.skivent.co"
+        "git.my-forgejo.com"
       ],
       "env": {
         "FORGEJO_TOKEN": "tu_token_opcional_para_aprobar_prs"
@@ -70,7 +70,7 @@ Si prefieres no usar `uvx`, el ejemplo anterior también funciona con:
         "git+https://github.com/jairov4/fj-mcp.git",
         "fj-mcp",
         "--default-host",
-        "git.skivent.co"
+        "git.my-forgejo.co"
       ]
     }
   }
